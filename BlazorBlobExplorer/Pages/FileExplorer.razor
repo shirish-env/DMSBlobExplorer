@@ -1,0 +1,447 @@
+@page "/"
+@using Microsoft.AspNetCore.Authorization
+@attribute [Authorize]
+
+@using BlazorBlobExplorer.Services
+@inject AzureBlobService BlobService
+@inject IConfiguration Config
+@inject IJSRuntime JS
+
+<PageTitle>Blob Explorer</PageTitle>
+
+<div class="explorer">
+
+    <!-- Breadcrumb -->
+    <div class="breadcrumb-bar">
+        <button class="crumb crumb-root" @onclick="NavigateToRoot">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
+            </svg>
+            @Config["AzureStorage:ContainerName"]
+        </button>
+        @foreach (var (crumb, path) in Breadcrumbs)
+        {
+            <span class="crumb-sep">›</span>
+            <button class="crumb" @onclick="() => NavigateTo(path)">@crumb</button>
+        }
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+        <div class="toolbar-left">
+            <label class="btn btn-primary upload-btn">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <polyline points="16 16 12 12 8 16" />
+                    <line x1="12" y1="12" x2="12" y2="21" />
+                    <path d="M20.39 18.39A5 5 0 0018 9h-1.26A8 8 0 103 16.3" />
+                </svg>
+                Upload Files
+                <InputFile OnChange="HandleFileUpload" multiple style="display:none" />
+            </label>
+            <button class="btn btn-secondary" @onclick="ShowNewFolderDialog">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                    <line x1="12" y1="11" x2="12" y2="17" />
+                    <line x1="9" y1="14" x2="15" y2="14" />
+                </svg>
+                New Folder
+            </button>
+        </div>
+        <div class="toolbar-right">
+            <input class="search-input" type="text" placeholder="Filter files..." @bind="SearchText" @bind:event="oninput" />
+            <button class="btn btn-icon" @onclick="Refresh" title="Refresh">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" class="@(IsLoading ? "spin" : "")">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10" />
+                </svg>
+            </button>
+        </div>
+    </div>
+
+    <!-- Upload progress -->
+    @if (UploadQueue.Any())
+    {
+        <div class="upload-progress-panel">
+            @foreach (var up in UploadQueue)
+            {
+                <div class="upload-item @(up.HasError ? "error" : up.IsComplete ? "complete" : "")">
+                    <span class="upload-filename">@up.FileName</span>
+                    <div class="upload-bar-wrap">
+                        <div class="upload-bar" style="width:@(up.Percent)%"></div>
+                    </div>
+                    <span class="upload-pct">@(up.HasError ? "Error" : up.IsComplete ? "Done" : $"{up.Percent}%")</span>
+                </div>
+            }
+        </div>
+    }
+
+    <!-- New folder dialog -->
+    @if (ShowingNewFolder)
+    {
+        <div class="modal-backdrop" @onclick="CancelNewFolder">
+            <div class="modal" @onclick:stopPropagation>
+                <h3>New Folder</h3>
+                <input class="modal-input" @bind="NewFolderName" @bind:event="oninput"
+                       @onkeydown="OnNewFolderKeyDown" placeholder="Folder name" autofocus />
+                <div class="modal-actions">
+                    <button class="btn btn-secondary" @onclick="CancelNewFolder">Cancel</button>
+                    <button class="btn btn-primary" @onclick="CreateFolder" disabled="@(string.IsNullOrWhiteSpace(NewFolderName))">Create</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    <!-- File list -->
+    @if (IsLoading)
+    {
+        <div class="loading-state">
+            <div class="spinner"></div>
+            <span>Loading...</span>
+        </div>
+    }
+    else if (ErrorMessage != null)
+    {
+        <div class="error-state">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+            </svg>
+            <p>@ErrorMessage</p>
+            <button class="btn btn-primary" @onclick="Refresh">Retry</button>
+        </div>
+    }
+    else if (!FilteredItems.Any())
+    {
+        <div class="empty-state">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+                <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+            </svg>
+            <p>@(string.IsNullOrEmpty(SearchText) ? "This folder is empty" : "No files match your filter")</p>
+        </div>
+    }
+    else
+    {
+        <div class="file-table-wrap">
+            <table class="file-table">
+                <thead>
+                    <tr>
+                        <th class="col-check">
+                            <input type="checkbox" @onchange="ToggleSelectAll"
+                                   checked="@(SelectedPaths.Count == FilteredItems.Count && FilteredItems.Any())" />
+                        </th>
+                        <th class="col-name" @onclick="SortByName">
+                            Name @SortIcon("name")
+                        </th>
+                        <th class="col-size" @onclick="SortBySize">
+                            Size @SortIcon("size")
+                        </th>
+                        <th class="col-date" @onclick="SortByDate">
+                            Modified @SortIcon("date")
+                        </th>
+                        <th class="col-actions">
+                            @if (SelectedPaths.Any())
+                            {
+                                <button class="btn-delete-sel" @onclick="DeleteSelected">
+                                    Delete (@SelectedPaths.Count)
+                                </button>
+                            }
+                        </th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var item in FilteredItems)
+                    {
+                        <tr class="file-row @(SelectedPaths.Contains(item.Path) ? "selected" : "")"
+                            @ondblclick="() => OnItemDoubleClick(item)">
+                            <td class="col-check">
+                                @if (!item.IsFolder)
+                                {
+                                    <input type="checkbox"
+                                           checked="@SelectedPaths.Contains(item.Path)"
+                                           @onchange="() => ToggleSelect(item.Path)" />
+                                }
+                            </td>
+                            <td class="col-name">
+                                <div class="item-name-cell">
+                                    @if (item.IsFolder)
+                                    {
+                                        <svg class="icon icon-folder" viewBox="0 0 24 24" fill="currentColor">
+                                            <path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+                                        </svg>
+                                    }
+                                    else
+                                    {
+                                        <svg class="icon icon-file" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                                            <polyline points="14 2 14 8 20 8" />
+                                        </svg>
+                                    }
+                                    <button class="item-name-btn" @onclick="() => OnItemClick(item)">
+                                        @item.DisplayName
+                                    </button>
+                                </div>
+                            </td>
+                            <td class="col-size">@item.SizeDisplay</td>
+                            <td class="col-date">@(item.IsFolder ? "" : item.LastModified.ToLocalTime().ToString("MMM d, yyyy HH:mm"))</td>
+                            <td class="col-actions">
+                                @if (!item.IsFolder)
+                                {
+                                    <button class="action-btn" title="Download" @onclick="() => DownloadFile(item)">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                            <polyline points="8 17 12 21 16 17" />
+                                            <line x1="12" y1="12" x2="12" y2="21" />
+                                            <path d="M20.88 18.09A5 5 0 0018 9h-1.26A8 8 0 103 16.3" />
+                                        </svg>
+                                    </button>
+                                    <button class="action-btn action-delete" title="Delete" @onclick="() => DeleteFile(item)">
+                                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                                            <polyline points="3 6 5 6 21 6" />
+                                            <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2" />
+                                        </svg>
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    <div class="status-bar">
+        @if (SelectedPaths.Any())
+        {
+            <span>@SelectedPaths.Count item(s) selected</span>
+        }
+        else
+        {
+            <span>@FilteredItems.Count(i => !i.IsFolder) file(s), @FilteredItems.Count(i => i.IsFolder) folder(s)</span>
+        }
+    </div>
+</div>
+
+@code {
+    private List<BlobItem> AllItems = new();
+    private HashSet<string> SelectedPaths = new();
+    private List<UploadProgress> UploadQueue = new();
+    private string CurrentPrefix = "";
+    private string SearchText = "";
+    private string SortColumn = "name";
+    private bool SortAscending = true;
+    private bool IsLoading = true;
+    private string? ErrorMessage;
+    private bool ShowingNewFolder = false;
+    private string NewFolderName = "";
+
+    private List<(string Label, string Path)> Breadcrumbs
+    {
+        get
+        {
+            var crumbs = new List<(string, string)>();
+            if (string.IsNullOrEmpty(CurrentPrefix)) return crumbs;
+            var parts = CurrentPrefix.TrimEnd('/').Split('/');
+            var cumulative = "";
+            foreach (var part in parts)
+            {
+                if (string.IsNullOrEmpty(part)) continue;
+                cumulative += part + "/";
+                crumbs.Add((part, cumulative));
+            }
+            return crumbs;
+        }
+    }
+
+    private List<BlobItem> FilteredItems
+    {
+        get
+        {
+            var items = AllItems.AsEnumerable();
+
+            if (!string.IsNullOrWhiteSpace(SearchText))
+                items = items.Where(i => i.DisplayName.Contains(SearchText, StringComparison.OrdinalIgnoreCase));
+
+            items = SortColumn switch
+            {
+                "size" => SortAscending ? items.OrderBy(i => i.IsFolder).ThenBy(i => i.Size)
+                                        : items.OrderBy(i => i.IsFolder).ThenByDescending(i => i.Size),
+                "date" => SortAscending ? items.OrderBy(i => i.IsFolder).ThenBy(i => i.LastModified)
+                                        : items.OrderBy(i => i.IsFolder).ThenByDescending(i => i.LastModified),
+                _ => SortAscending ? items.OrderBy(i => !i.IsFolder).ThenBy(i => i.DisplayName)
+                                   : items.OrderBy(i => !i.IsFolder).ThenByDescending(i => i.DisplayName)
+            };
+
+            return items.ToList();
+        }
+    }
+
+    protected override async Task OnInitializedAsync() => await LoadItems();
+
+    private async Task LoadItems()
+    {
+        IsLoading = true;
+        ErrorMessage = null;
+        SelectedPaths.Clear();
+        try
+        {
+            AllItems = await BlobService.ListAsync(CurrentPrefix);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Failed to load files: {ex.Message}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    private async Task Refresh() => await LoadItems();
+
+    private async Task NavigateToRoot() => await NavigateTo("");
+
+    private async Task NavigateTo(string path)
+    {
+        CurrentPrefix = path;
+        SearchText = "";
+        await LoadItems();
+    }
+
+    private async Task OnItemClick(BlobItem item)
+    {
+        if (item.IsFolder) await NavigateTo(item.Path);
+    }
+
+    private async Task OnItemDoubleClick(BlobItem item)
+    {
+        if (!item.IsFolder) await DownloadFile(item);
+    }
+
+    private async Task DownloadFile(BlobItem item)
+    {
+        var url = await BlobService.GetDownloadUrlAsync(item.Path);
+        await JS.InvokeVoidAsync("open", url, "_blank");
+    }
+
+    private async Task DeleteFile(BlobItem item)
+    {
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Delete '{item.DisplayName}'?");
+        if (!confirmed) return;
+        await BlobService.DeleteAsync(item.Path);
+        await LoadItems();
+    }
+
+    private async Task DeleteSelected()
+    {
+        var confirmed = await JS.InvokeAsync<bool>("confirm", $"Delete {SelectedPaths.Count} selected item(s)?");
+        if (!confirmed) return;
+        foreach (var path in SelectedPaths.ToList())
+            await BlobService.DeleteAsync(path);
+        SelectedPaths.Clear();
+        await LoadItems();
+    }
+
+    private void ToggleSelect(string path)
+    {
+        if (!SelectedPaths.Remove(path)) SelectedPaths.Add(path);
+    }
+
+    private void ToggleSelectAll(ChangeEventArgs e)
+    {
+        var all = (bool?)e.Value ?? false;
+        SelectedPaths = all ? FilteredItems.Where(i => !i.IsFolder).Select(i => i.Path).ToHashSet() : new();
+    }
+
+    private async Task HandleFileUpload(InputFileChangeEventArgs e)
+    {
+        UploadQueue.Clear();
+        var files = e.GetMultipleFiles(500);
+
+        foreach (var file in files)
+        {
+            var prog = new UploadProgress { FileName = file.Name };
+            UploadQueue.Add(prog);
+        }
+
+        StateHasChanged();
+
+        foreach (var (file, prog) in files.Zip(UploadQueue))
+        {
+            try
+            {
+                var blobPath = string.IsNullOrEmpty(CurrentPrefix)
+                    ? file.Name
+                    : CurrentPrefix.TrimEnd('/') + "/" + file.Name;
+
+                var progress = new Progress<int>(pct =>
+                {
+                    prog.Percent = pct;
+                    InvokeAsync(StateHasChanged);
+                });
+
+                await using var stream = file.OpenReadStream(maxAllowedSize: 500 * 1024 * 1024);
+                var success = await BlobService.UploadAsync(blobPath, stream, file.ContentType ?? "application/octet-stream", progress);
+                prog.IsComplete = success;
+                prog.HasError = !success;
+            }
+            catch (Exception ex)
+            {
+                prog.HasError = true;
+                prog.ErrorMessage = ex.Message;
+            }
+
+            StateHasChanged();
+        }
+
+        await Task.Delay(1500);
+        UploadQueue.Clear();
+        await LoadItems();
+    }
+
+    private void ShowNewFolderDialog()
+    {
+        NewFolderName = "";
+        ShowingNewFolder = true;
+    }
+
+    private void CancelNewFolder()
+    {
+        ShowingNewFolder = false;
+        NewFolderName = "";
+    }
+
+    private async Task CreateFolder()
+    {
+        if (string.IsNullOrWhiteSpace(NewFolderName)) return;
+        var path = string.IsNullOrEmpty(CurrentPrefix)
+            ? NewFolderName
+            : CurrentPrefix.TrimEnd('/') + "/" + NewFolderName;
+        ShowingNewFolder = false;
+        await BlobService.CreateFolderAsync(path);
+        await LoadItems();
+    }
+
+    private async Task OnNewFolderKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter") await CreateFolder();
+        else if (e.Key == "Escape") CancelNewFolder();
+    }
+
+    private void SortByName() => SortBy("name");
+    private void SortBySize() => SortBy("size");
+    private void SortByDate() => SortBy("date");
+
+    private void SortBy(string column)
+    {
+        if (SortColumn == column) SortAscending = !SortAscending;
+        else { SortColumn = column; SortAscending = true; }
+    }
+
+    private MarkupString SortIcon(string column)
+    {
+        if (SortColumn != column) return new MarkupString("");
+        return new MarkupString(SortAscending
+            ? "<span class='sort-icon'>↑</span>"
+            : "<span class='sort-icon'>↓</span>");
+    }
+}

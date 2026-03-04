@@ -1,0 +1,12 @@
+@namespace BlazorBlobExplorer.Shared
+@inject NavigationManager Navigation
+
+@code {
+    protected override void OnInitialized()
+    {
+        // SWA built-in auth — redirect directly to Azure's login endpoint.
+        // No app registration needed; SWA handles this automatically.
+        var returnUrl = Uri.EscapeDataString(Navigation.Uri);
+        Navigation.NavigateTo($"/.auth/login/aad?post_login_redirect_uri={returnUrl}", forceLoad: true);
+    }
+}
